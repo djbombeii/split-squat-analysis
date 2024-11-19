@@ -13,10 +13,6 @@ mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 pose = mp_pose.Pose()
 
-# App Title
-st.title("Split Squat Analysis with Visual Overlays and Jump Height")
-st.write("Upload a video to analyze alternating split squat jumps.")
-
 # Function to calculate jump height in inches
 def calculate_jump_height(foot_positions, frame_height, peaks, person_height_inches=68):
     """
@@ -45,6 +41,10 @@ def calculate_jump_height(foot_positions, frame_height, peaks, person_height_inc
     
     return heights_inches
 
+# App Title
+st.title("Split Squat Analysis with Visual Overlays and Jump Height")
+st.write("Upload a video to analyze alternating split squat jumps.")
+
 # Video Upload Section
 uploaded_file = st.file_uploader("Upload a Video", type=["mp4", "mov"])
 
@@ -55,7 +55,75 @@ person_height = st.number_input("Enter your height in inches (default: 68 inches
                               value=68)
 
 if uploaded_file:
-    # [Previous code remains the same until after peak detection]
+    # Save uploaded video to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+        temp_file.write(uploaded_file.read())
+        video_path = temp_file.name
+
+    st.success("Video uploaded successfully!")
+
+    # Load the video
+    cap = cv2.VideoCapture(video_path)
+
+    # Prepare to save frames
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    # Calculate video duration in minutes
+    video_duration_minutes = total_frames / (fps * 60)
+
+    # Temporary directory for frames
+    frames_dir = tempfile.mkdtemp()
+
+    # Variables for jump classification and counting
+    left_foot_positions = []
+    right_foot_positions = []
+    frame_count = 0
+
+    # Process video frame by frame and collect feet positions
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Convert frame to RGB for MediaPipe
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Process the frame with MediaPipe Pose
+        results = pose.process(frame_rgb)
+
+        # Draw pose landmarks and connections
+        if results.pose_landmarks:
+            mp_drawing.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+
+            # Track Y-coordinate of both feet
+            left_foot = results.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_FOOT_INDEX]
+            right_foot = results.pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_FOOT_INDEX]
+            
+            left_foot_positions.append(left_foot.y)
+            right_foot_positions.append(right_foot.y)
+
+        # Save the frame
+        frame_path = os.path.join(frames_dir, f"frame_{frame_count:04d}.png")
+        cv2.imwrite(frame_path, frame)
+        frame_count += 1
+
+    cap.release()
+
+    # Convert positions to numpy arrays
+    left_foot_positions = np.array(left_foot_positions)
+    right_foot_positions = np.array(right_foot_positions)
+    
+    # Calculate foot height difference
+    foot_difference = left_foot_positions - right_foot_positions
+    
+    # Find peaks for alternating pattern
+    # Positive peaks (left foot higher)
+    left_peaks, left_properties = find_peaks(foot_difference, prominence=0.1)
+    # Negative peaks (right foot higher)
+    right_peaks, right_properties = find_peaks(-foot_difference, prominence=0.1)
     
     # Calculate jump heights for both feet
     left_heights = calculate_jump_height(left_foot_positions, frame_height, left_peaks, person_height)
@@ -112,7 +180,29 @@ if uploaded_file:
         st.write(f"Average Height: {avg_right_height:.1f} inches")
         st.write(f"Max Height: {max_right_height:.1f} inches")
 
-    # Update the frame overlay to include jump heights
+    # Count alternating patterns
+    total_alternations = min(len(left_peaks), len(right_peaks))
+    reps_per_minute = total_alternations / video_duration_minutes
+
+    # Display counts in Streamlit
+    st.write(f"### Analysis Results:")
+    st.write(f"Total Split Squat Jumps: {total_alternations}")
+    st.write(f"Video Duration: {video_duration_minutes:.2f} minutes")
+    st.write(f"Reps per Minute: {reps_per_minute:.1f}")
+
+    # Create frame-by-frame counters
+    jumps_by_frame = {frame: {'count': 0} for frame in range(frame_count)}
+
+    # Update running counter
+    current_count = 0
+    all_peaks = sorted(list(left_peaks) + list(right_peaks))
+    
+    for peak_idx in all_peaks:
+        current_count = (current_count + 1) // 2  # Increment counter for each complete alternation
+        for frame in range(peak_idx, frame_count):
+            jumps_by_frame[frame] = {'count': current_count}
+
+    # Process saved frames again to add text overlays
     for i in range(frame_count):
         frame_path = os.path.join(frames_dir, f"frame_{i:04d}.png")
         frame = cv2.imread(frame_path)
@@ -147,4 +237,29 @@ if uploaded_file:
 
             cv2.imwrite(frame_path, frame)
 
-    # [Rest of the code remains the same]
+    # Use FFmpeg to compile frames into video
+    output_video_path = "output_with_overlays.mp4"
+    ffmpeg_command = [
+        "ffmpeg",
+        "-y",
+        "-framerate", str(fps),
+        "-i", os.path.join(frames_dir, "frame_%04d.png"),
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-preset", "fast",
+        output_video_path
+    ]
+    subprocess.run(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    # Display the processed video
+    st.write("### Processed Video with Visual Overlays")
+    st.video(output_video_path)
+
+    # Cleanup
+    os.remove(video_path)
+    for frame_file in os.listdir(frames_dir):
+        os.remove(os.path.join(frames_dir, frame_file))
+    os.rmdir(frames_dir)
+
+else:
+    st.warning("Please upload a video.")
