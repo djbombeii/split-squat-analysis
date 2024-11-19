@@ -33,43 +33,44 @@ def detect_jumps(foot_positions, reference_positions, prominence=0.01, distance=
     
     return np.array(validated_peaks), foot_properties
 
-def calculate_improved_jump_height(foot_positions, shoulder_positions, peaks, frame_height, person_height_inches=68):
+def calculate_flight_time(positions, peaks, fps):
     """
-    Calculate jump height using shoulder position as a stable reference
+    Calculate flight time for each jump by finding takeoff and landing points
     """
-    if len(peaks) == 0:
-        return np.array([])
+    flight_times = []
+    takeoff_indices = []
+    landing_indices = []
+    
+    for peak in peaks:
+        # Look before peak for takeoff (when foot leaves ground)
+        takeoff_idx = peak
+        for i in range(peak, max(peak-20, 0), -1):  # Look up to 20 frames before peak
+            if positions[i] - positions[i-1] < -0.01:  # Threshold for takeoff detection
+                takeoff_idx = i
+                break
+                
+        # Look after peak for landing
+        landing_idx = peak
+        for i in range(peak, min(peak+20, len(positions)-1)):  # Look up to 20 frames after peak
+            if positions[i] - positions[i-1] > 0.01:  # Threshold for landing detection
+                landing_idx = i
+                break
         
-    # Get baseline positions
-    foot_baseline = np.median(foot_positions[:10])
-    shoulder_baseline = np.median(shoulder_positions[:10])
-    baseline_difference = foot_baseline - shoulder_baseline
+        # Calculate flight time in seconds
+        flight_time = (landing_idx - takeoff_idx) / fps
+        
+        flight_times.append(flight_time)
+        takeoff_indices.append(takeoff_idx)
+        landing_indices.append(landing_idx)
     
-    # Calculate height displacement relative to shoulder movement
-    peak_foot_positions = foot_positions[peaks]
-    peak_shoulder_positions = shoulder_positions[peaks]
-    
-    # Calculate relative displacement
-    relative_displacements = (foot_baseline - peak_foot_positions) - (shoulder_baseline - peak_shoulder_positions)
-    
-    # Convert to inches using person height as reference
-    pixels_per_inch = (frame_height * 0.9) / person_height_inches
-    heights_inches = relative_displacements * (1/pixels_per_inch)
-    
-    return heights_inches
+    return np.array(flight_times), np.array(takeoff_indices), np.array(landing_indices)
 
 # App Title
-st.title("Split Squat Analysis with Visual Overlays and Jump Height")
+st.title("Split Squat Analysis with Visual Overlays and Flight Time")
 st.write("Upload a video to analyze alternating split squat jumps.")
 
 # Video Upload Section
 uploaded_file = st.file_uploader("Upload a Video", type=["mp4", "mov"])
-
-# Optional height input
-person_height = st.number_input("Enter your height in inches (default: 68 inches = 5'8\")", 
-                              min_value=48, 
-                              max_value=84, 
-                              value=68)
 
 if uploaded_file:
     # Save uploaded video to a temporary file
@@ -141,8 +142,7 @@ if uploaded_file:
         frame_count += 1
 
     cap.release()
-
-    # Convert positions to numpy arrays
+# Convert positions to numpy arrays
     left_foot_positions = np.array(left_foot_positions)
     right_foot_positions = np.array(right_foot_positions)
     shoulder_positions = np.array(shoulder_positions)
@@ -152,9 +152,9 @@ if uploaded_file:
     left_peaks, left_properties = detect_jumps(left_foot_positions, shoulder_positions, prominence=0.01, distance=15)
     right_peaks, right_properties = detect_jumps(right_foot_positions, shoulder_positions, prominence=0.01, distance=15)
 
-    # Calculate jump heights
-    left_heights = calculate_improved_jump_height(left_foot_positions, shoulder_positions, left_peaks, frame_height, person_height)
-    right_heights = calculate_improved_jump_height(right_foot_positions, shoulder_positions, right_peaks, frame_height, person_height)
+    # Calculate flight times
+    left_flight_times, left_takeoffs, left_landings = calculate_flight_time(left_foot_positions, left_peaks, fps)
+    right_flight_times, right_takeoffs, right_landings = calculate_flight_time(right_foot_positions, right_peaks, fps)
     
     # Create and display the split squat detection graph
     st.write("### Movement Analysis Graphs")
@@ -164,9 +164,16 @@ if uploaded_file:
     ax1.plot(-left_foot_positions, label='Left Foot', color='blue', alpha=0.7)
     ax1.plot(-right_foot_positions, label='Right Foot', color='red', alpha=0.7)
     ax1.plot(-shoulder_positions, label='Shoulder Reference', color='green', alpha=0.5)
-    ax1.plot(left_peaks, -left_foot_positions[left_peaks], "bx", label="Left Foot Jumps")
-    ax1.plot(right_peaks, -right_foot_positions[right_peaks], "rx", label="Right Foot Jumps")
-    ax1.set_title('Vertical Movement Tracking')
+    
+    # Plot jump phases
+    for takeoff, peak, landing in zip(left_takeoffs, left_peaks, left_landings):
+        ax1.axvspan(takeoff, landing, alpha=0.2, color='blue')
+    for takeoff, peak, landing in zip(right_takeoffs, right_peaks, right_landings):
+        ax1.axvspan(takeoff, landing, alpha=0.2, color='red')
+    
+    ax1.plot(left_peaks, -left_foot_positions[left_peaks], "bx", label="Left Foot Peaks")
+    ax1.plot(right_peaks, -right_foot_positions[right_peaks], "rx", label="Right Foot Peaks")
+    ax1.set_title('Vertical Movement Tracking\n(Shaded areas show flight phases)')
     ax1.set_ylabel('Height (inverted)')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
@@ -181,14 +188,14 @@ if uploaded_file:
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
-    # Plot calculated jump heights
-    if len(left_heights) > 0:
-        ax3.plot(left_peaks, left_heights, 'bo-', label='Left Jump Height', alpha=0.7)
-    if len(right_heights) > 0:
-        ax3.plot(right_peaks, right_heights, 'ro-', label='Right Jump Height', alpha=0.7)
-    ax3.set_title('Jump Heights')
+    # Plot flight times
+    if len(left_flight_times) > 0:
+        ax3.plot(left_peaks, left_flight_times, 'bo-', label='Left Flight Time', alpha=0.7)
+    if len(right_flight_times) > 0:
+        ax3.plot(right_peaks, right_flight_times, 'ro-', label='Right Flight Time', alpha=0.7)
+    ax3.set_title('Jump Flight Times')
     ax3.set_xlabel('Frame Index')
-    ax3.set_ylabel('Height (inches)')
+    ax3.set_ylabel('Flight Time (seconds)')
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
@@ -211,23 +218,23 @@ if uploaded_file:
         st.write(f"Reps per Minute: {reps_per_minute:.1f}")
     
     with col2:
-        st.write("Jump Heights:")
-        if len(left_heights) > 0:
-            st.write(f"Left Max Height: {np.max(left_heights):.1f} inches")
-            st.write(f"Left Avg Height: {np.mean(left_heights):.1f} inches")
-        if len(right_heights) > 0:
-            st.write(f"Right Max Height: {np.max(right_heights):.1f} inches")
-            st.write(f"Right Avg Height: {np.mean(right_heights):.1f} inches")
+        st.write("Flight Times:")
+        if len(left_flight_times) > 0:
+            st.write(f"Left Max Flight Time: {np.max(left_flight_times):.3f} seconds")
+            st.write(f"Left Avg Flight Time: {np.mean(left_flight_times):.3f} seconds")
+        if len(right_flight_times) > 0:
+            st.write(f"Right Max Flight Time: {np.max(right_flight_times):.3f} seconds")
+            st.write(f"Right Avg Flight Time: {np.mean(right_flight_times):.3f} seconds")
 
     # Create frame-by-frame counters
-    jumps_by_frame = {frame: {'count': 0, 'left_height': 0, 'right_height': 0} 
+    jumps_by_frame = {frame: {'count': 0, 'left_flight': 0, 'right_flight': 0} 
                      for frame in range(frame_count)}
 
-    # Update counters and heights for each frame
-    def get_latest_height(frame_idx, peak_indices, heights):
+    # Update counters and flight times for each frame
+    def get_latest_flight_time(frame_idx, peak_indices, flight_times):
         valid_peaks = peak_indices[peak_indices <= frame_idx]
         if len(valid_peaks) > 0:
-            return heights[len(valid_peaks) - 1]
+            return flight_times[len(valid_peaks) - 1]
         return 0
 
     for i in range(frame_count):
@@ -237,8 +244,8 @@ if uploaded_file:
         
         jumps_by_frame[i] = {
             'count': total_count,
-            'left_height': get_latest_height(i, left_peaks, left_heights),
-            'right_height': get_latest_height(i, right_peaks, right_heights)
+            'left_flight': get_latest_flight_time(i, left_peaks, left_flight_times),
+            'right_flight': get_latest_flight_time(i, right_peaks, right_flight_times)
         }
 
     # Process frames with overlays
@@ -267,8 +274,8 @@ if uploaded_file:
             put_text_with_background(frame, f'Split Squats: {current_data["count"]}', (50, 50))
             current_rpm = (current_data["count"] / (i/fps/60)) if i > 0 else 0
             put_text_with_background(frame, f'Reps/min: {current_rpm:.1f}', (50, 100))
-            put_text_with_background(frame, f'L Height: {current_data["left_height"]:.1f}"', (50, 150))
-            put_text_with_background(frame, f'R Height: {current_data["right_height"]:.1f}"', (50, 200))
+            put_text_with_background(frame, f'L Flight: {current_data["left_flight"]:.3f}s', (50, 150))
+            put_text_with_background(frame, f'R Flight: {current_data["right_flight"]:.3f}s', (50, 200))
 
             cv2.imwrite(frame_path, frame)
 
@@ -298,3 +305,4 @@ if uploaded_file:
 
 else:
     st.warning("Please upload a video.")
+    
